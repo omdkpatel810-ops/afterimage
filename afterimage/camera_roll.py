@@ -8,8 +8,8 @@ path, e.g.
     -> a preview of Media/DCIM/100APPLE/IMG_0001.HEIC
 
 A preview whose original isn't in the backup is the interesting case. Either the photo was deleted and the
-preview stayed behind, or the photo lives in iCloud and the phone only kept a small copy. Telling those
-apart takes the Photos database (Photos.sqlite), which comes next.
+preview stayed behind, or the photo lives in iCloud and the phone only kept a small copy. The Photos
+database tells which (see library.py).
 """
 
 from __future__ import annotations
@@ -71,6 +71,7 @@ class CameraRoll:
     database: list[BackupFile] = field(default_factory=list)
     other: list[BackupFile] = field(default_factory=list)
     not_on_disk: list[BackupFile] = field(default_factory=list)  # in Manifest.db, missing from the folder
+    paths: set[str] = field(default_factory=set)  # every camera roll file's path, whatever it is
 
     @property
     def total(self) -> int:
@@ -92,12 +93,15 @@ class CameraRoll:
 
     @property
     def has_database(self) -> bool:
-        return any(f.relative_path == DATABASE[0] for f in self.database)
+        return self.database_file(DATABASE[0]) is not None
+
+    def database_file(self, path: str) -> BackupFile | None:
+        """Photos.sqlite, or its -wal or -shm file, if the backup lists it."""
+        return next((f for f in self.database if f.relative_path == path), None)
 
     def without_original(self) -> list[str]:
         """Originals that have previews in the backup but aren't in it themselves."""
-        present = {f.relative_path for f in self.originals}
-        return sorted(original for original in self.thumbnails if original not in present)
+        return sorted(original for original in self.thumbnails if original not in self.paths)
 
 
 def scan(backup: Backup) -> CameraRoll:
@@ -108,6 +112,7 @@ def scan(backup: Backup) -> CameraRoll:
         if backup.locate(entry) is None:
             roll.not_on_disk.append(entry)
         path = entry.relative_path
+        roll.paths.add(path)
         if (parsed := parse_thumbnail(path)) is not None:
             original, variant = parsed
             roll.thumbnails.setdefault(original, []).append(Thumbnail(entry, original, variant))

@@ -175,7 +175,7 @@ def test_files_by_domain_and_prefix(phone):
         dcim = [f.relative_path for f in backup.files(CAMERA_ROLL, "Media/DCIM/")]
         sms = list(backup.files("HomeDomain"))
 
-    assert len(everything) == 21
+    assert len(everything) == 22
     assert dcim == [
         "Media/DCIM/100APPLE",
         "Media/DCIM/100APPLE/IMG_0001.HEIC",
@@ -198,8 +198,8 @@ def test_files_by_domain_and_prefix(phone):
 
 def test_counts(phone):
     with Backup(phone) as backup:
-        assert backup.kinds() == {"file": 18, "folder": 3}
-        assert backup.domains() == [(CAMERA_ROLL, 19), ("AppDomain-com.example.notes", 1), ("HomeDomain", 1)]
+        assert backup.kinds() == {"file": 19, "folder": 3}
+        assert backup.domains() == [(CAMERA_ROLL, 20), ("AppDomain-com.example.notes", 1), ("HomeDomain", 1)]
 
 
 def test_unknown_flags_and_unreadable_records(backups_dir):

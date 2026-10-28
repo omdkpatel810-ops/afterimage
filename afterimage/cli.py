@@ -13,6 +13,21 @@ from typing import TextIO
 from . import __version__
 from .backup import Backup, BackupError, BackupInfo, default_backup_dirs, find_backups, read_info
 from .camera_roll import scan
+from .library import (
+    GONE,
+    IN_LIBRARY,
+    RECENTLY_DELETED,
+    STATUSES,
+    UNKNOWN,
+    Asset,
+    Leftover,
+    Library,
+    LibraryError,
+    by_status,
+    find_leftovers,
+    read_library,
+    recently_deleted_in_backup,
+)
 
 HOW_TO_BACK_UP = (
     "To make one, connect your iPhone to this computer, open Finder (Mac) or the Apple Devices app or iTunes"
@@ -154,6 +169,12 @@ def _info(args: argparse.Namespace, ctx: Context) -> int:
 def _photos(args: argparse.Namespace, ctx: Context) -> int:
     with Backup(_resolve(args.backup, ctx)) as backup:
         info, roll = backup.info, scan(backup)
+        library, problem = None, None
+        if roll.thumbnails or roll.has_database:
+            try:
+                library = read_library(backup, roll)
+            except LibraryError as error:
+                problem = str(error)
 
     details = [info.name, f"iOS {info.ios_version or '?'}", f"backed up {_when(info.last_backup, ctx.tz)}"]
     print(" · ".join(details), file=ctx.out)
@@ -177,37 +198,65 @@ def _photos(args: argparse.Namespace, ctx: Context) -> int:
             ".ithmb files, many thumbnails in each" if roll.thumbnail_tables else "",
         ],
         ["Edited versions", f"{len(roll.edits):,}", ""],
-        ["Photos database", "found" if roll.has_database else "missing", ""],
+        _database_row(roll.has_database, library),
         ["Other files", f"{len(roll.other):,}", ""],
     ]
     print("\nCamera roll in this backup:", file=ctx.out)
     for line in _table(rows, right={1}):
         print("  " + line, file=ctx.out)
 
-    missing = roll.without_original()
+    leftovers = find_leftovers(roll, library)
+    full_size = recently_deleted_in_backup(roll, library)
+    groups = by_status(leftovers)
     print(file=ctx.out)
     if not roll.thumbnails:
         print("There are no thumbnails in Media/PhotoData/Thumbnails/V2 in this backup.", file=ctx.out)
-    elif not missing:
+    elif not leftovers:
         print("Every thumbnail's photo or video is in this backup too.", file=ctx.out)
-    else:
-        verb = "has" if len(missing) == 1 else "have"
+    elif library is None:
+        verb = "has" if len(leftovers) == 1 else "have"
         print(
-            f"{_plural(len(missing), 'photo or video', 'photos and videos')} {verb} thumbnails but no original"
+            f"{_plural(len(leftovers), 'photo or video', 'photos and videos')} {verb} thumbnails but no original"
             " in this backup.\nEach was deleted, or is kept in iCloud and the phone held only a small copy."
-            "\nThis version can't tell those apart yet; the next one will, using the Photos database.",
+            f"\n{problem} So afterimage can't tell which.",
             file=ctx.out,
         )
-        if args.list:
-            print("\nThumbnails with no original in this backup:", file=ctx.out)
-            rows = [
-                [original.removeprefix("Media/"), _plural(len(roll.thumbnails[original]), "thumbnail")]
-                for original in missing
-            ]
-            for line in _table(rows):
+    else:
+        print(
+            f"{_plural(len(leftovers), 'photo or video', 'photos and videos')} with thumbnails but no original"
+            " in this backup:",
+            file=ctx.out,
+        )
+        rows = [[LABELS[status], f"{len(groups[status]):,}"] for status in STATUSES if status in groups]
+        for line in _table(rows, right={1}):
+            print("  " + line, file=ctx.out)
+    if full_size:
+        verb = "is" if len(full_size) == 1 else "are"
+        print(
+            f"\n{_plural(len(full_size), 'photo or video', 'photos and videos')} in Recently Deleted {verb}"
+            " still in this backup at full size.",
+            file=ctx.out,
+        )
+
+    if args.list:
+        for status in STATUSES:
+            if status in groups:
+                print(f"\n{HEADINGS[status]} ({len(groups[status]):,}):", file=ctx.out)
+                found = [[g.original.removeprefix("Media/"), _describe(g.asset, g, ctx.tz)] for g in groups[status]]
+                for line in _table(found):
+                    print("  " + line, file=ctx.out)
+        if full_size:
+            print(f"\nIn Recently Deleted, still in this backup at full size ({len(full_size):,}):", file=ctx.out)
+            for line in _table([[a.path.removeprefix("Media/"), _describe(a, None, ctx.tz)] for a in full_size]):
                 print("  " + line, file=ctx.out)
-        else:
-            print("Add --list to see them.", file=ctx.out)
+    elif leftovers or full_size:
+        print("Add --list to see them.", file=ctx.out)
+    if RECENTLY_DELETED in groups or full_size:
+        print(
+            "\nRecently Deleted keeps photos for about 30 days. Until then, the phone can restore them at full"
+            " size from that album in the Photos app.",
+            file=ctx.out,
+        )
     if roll.not_on_disk:
         print(
             f"\nNote: {_plural(len(roll.not_on_disk), 'camera roll file')} listed in Manifest.db"
@@ -216,6 +265,52 @@ def _photos(args: argparse.Namespace, ctx: Context) -> int:
             file=ctx.out,
         )
     return 0
+
+
+LABELS = {
+    GONE: "No longer in the library: only thumbnails are left",
+    RECENTLY_DELETED: "In Recently Deleted",
+    IN_LIBRARY: "Still in the library, original not in this backup",
+    UNKNOWN: "Deleted, or kept in iCloud",
+}
+HEADINGS = {
+    **LABELS,
+    IN_LIBRARY: "Still in the library; the original isn't in this backup, usually because it's kept in iCloud",
+}
+
+
+def _database_row(found: bool, library: Library | None) -> list[str]:
+    if library is None:
+        return ["Photos database", "unreadable" if found else "missing", ""]
+    parts = [_plural(len(library.assets), "photo or video", "photos and videos")]
+    if trashed := library.count(trashed=True):
+        parts.append(f"{trashed:,} in Recently Deleted")
+    if hidden := library.count(hidden=True):
+        parts.append(f"{hidden:,} hidden")
+    return ["Photos database", "found", ", ".join(parts)]
+
+
+def _describe(asset: Asset | None, leftover: Leftover | None, tz: tzinfo | None) -> str:
+    """One line about a photo: what the library knows about it, and what its thumbnails say."""
+    parts = []
+    if asset is not None:
+        if asset.kind:
+            parts.append(asset.kind)
+        if asset.taken:
+            parts.append(f"taken {_when(asset.taken, tz)}")
+        if asset.place:
+            parts.append(f"at {asset.place[0]:.5f}, {asset.place[1]:.5f}")
+        if asset.trashed:
+            parts.append(f"deleted {_when(asset.trashed_on, tz)}" if asset.trashed_on else "deleted")
+        if asset.hidden:
+            parts.append("hidden")
+        if asset.original_name:
+            parts.append(f"first named {asset.original_name}")
+    if leftover is not None:
+        parts.append(_plural(len(leftover.thumbnails), "thumbnail"))
+        if asset is None and leftover.thumbnail_saved is not None:
+            parts.append(f"saved {_when(leftover.thumbnail_saved, tz)}")
+    return ", ".join(parts)
 
 
 # Helpers -----------------------------------------------------------------------------------------------

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import plistlib
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -174,8 +175,113 @@ class FakeBackup:
         return root
 
 
-def add_camera_roll(fake: FakeBackup) -> FakeBackup:
-    """Three photos and videos with their thumbnails, plus thumbnails of two that aren't in the backup."""
+CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)
+ICLOUD = "PhotoData/CPLAssets/group349/6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9.JPG"
+
+
+def utc(*parts: int) -> datetime:
+    return datetime(*parts, tzinfo=timezone.utc)
+
+
+@dataclass
+class Row:
+    """One photo or video in a fake Photos library."""
+
+    directory: str | None
+    filename: str | None
+    kind: int = 0
+    taken: datetime | None = None
+    place: tuple[float, float] = (-180.0, -180.0)  # how Photos stores "no location"
+    trashed_on: datetime | None = None  # set: in Recently Deleted
+    hidden: bool = False
+    favorite: bool = False
+    original_name: str | None = None
+
+
+def _core_data(moment: datetime | None) -> float | None:
+    return None if moment is None else (moment - CORE_DATA_EPOCH).total_seconds()
+
+
+def photos_database(rows: list[Row], table: str = "ZASSET", keep_in_log: bool = False) -> dict[str, bytes]:
+    """A Photos.sqlite with the columns afterimage reads, as {file name: contents}.
+
+    With keep_in_log, the rows are only in the write-ahead log (Photos.sqlite-wal), not yet in the database
+    file itself, as can happen on a phone.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / "Photos.sqlite"
+        db = sqlite3.connect(path)
+        db.executescript(
+            f"""
+            CREATE TABLE {table} (
+                Z_PK INTEGER PRIMARY KEY, Z_ENT INTEGER, ZUUID VARCHAR, ZDIRECTORY VARCHAR, ZFILENAME VARCHAR,
+                ZKIND INTEGER, ZDATECREATED TIMESTAMP, ZADDEDDATE TIMESTAMP, ZLATITUDE FLOAT, ZLONGITUDE FLOAT,
+                ZTRASHEDSTATE INTEGER, ZTRASHEDDATE TIMESTAMP, ZHIDDEN INTEGER, ZFAVORITE INTEGER,
+                ZADDITIONALATTRIBUTES INTEGER
+            );
+            CREATE TABLE ZADDITIONALASSETATTRIBUTES (
+                Z_PK INTEGER PRIMARY KEY, ZASSET INTEGER, ZORIGINALFILENAME VARCHAR, ZTIMEZONENAME VARCHAR
+            );
+            """
+        )
+        if keep_in_log:
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("PRAGMA wal_autocheckpoint = 0")
+        for pk, row in enumerate(rows, start=1):
+            db.execute(
+                f"INSERT INTO {table} VALUES (?, 33, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    pk,
+                    f"UUID-{pk}",
+                    row.directory,
+                    row.filename,
+                    row.kind,
+                    _core_data(row.taken),
+                    _core_data(row.taken),
+                    *row.place,
+                    1 if row.trashed_on else 0,
+                    _core_data(row.trashed_on),
+                    int(row.hidden),
+                    int(row.favorite),
+                    pk,
+                ),
+            )
+            db.execute(
+                "INSERT INTO ZADDITIONALASSETATTRIBUTES VALUES (?, ?, ?, 'America/Winnipeg')",
+                (pk, pk, row.original_name or row.filename),
+            )
+        db.commit()
+        files = {"Photos.sqlite": path.read_bytes()}
+        log = path.with_name("Photos.sqlite-wal")
+        if keep_in_log and log.exists():  # read while still open: closing moves the rows into the database
+            files[log.name] = log.read_bytes()
+        db.close()
+    return files
+
+
+LIBRARY = [
+    Row("DCIM/100APPLE", "IMG_0001.HEIC", taken=utc(2026, 10, 18, 18, 2), place=(49.8951, -97.1384)),
+    Row("DCIM/100APPLE", "IMG_0002.JPG", taken=utc(2026, 10, 18, 19, 30), favorite=True),
+    Row("DCIM/100APPLE", "IMG_0003.MOV", kind=1, taken=utc(2026, 10, 19, 1, 10), trashed_on=utc(2026, 10, 19, 22, 0)),
+    # IMG_0004.HEIC has no row: it was deleted for good, and only its thumbnails are left.
+    Row("DCIM/100APPLE", "IMG_0005.HEIC", taken=utc(2026, 10, 17, 15, 45), trashed_on=utc(2026, 10, 20, 12, 0)),
+    Row(
+        ICLOUD.rpartition("/")[0],
+        ICLOUD.rpartition("/")[2],
+        taken=utc(2025, 7, 1, 16, 20),
+        place=(51.0447, -114.0719),
+        hidden=True,
+        original_name="IMG_4821.JPG",  # iCloud files get new names; the database keeps the camera's
+    ),
+]
+
+
+def add_camera_roll(fake: FakeBackup, library: list[Row] | None = LIBRARY, keep_in_log: bool = True) -> FakeBackup:
+    """A camera roll with its Photos library. Three photos and videos are in the backup with their thumbnails.
+
+    Three more have thumbnails but no original: IMG_0004 was deleted for good, IMG_0005 is in Recently
+    Deleted, and the iCloud one is still in the library. IMG_0003 is in Recently Deleted but still here.
+    """
     fake.folder(CAMERA_ROLL, "Media").folder(CAMERA_ROLL, "Media/DCIM").folder(CAMERA_ROLL, "Media/DCIM/100APPLE")
     fake.file(CAMERA_ROLL, "Media/DCIM/100APPLE/IMG_0001.HEIC", HEIC)
     fake.file(CAMERA_ROLL, "Media/DCIM/100APPLE/IMG_0002.JPG", JPEG * 40)
@@ -185,16 +291,18 @@ def add_camera_roll(fake: FakeBackup) -> FakeBackup:
         "DCIM/100APPLE/IMG_0001.HEIC": ["5005", "5003"],
         "DCIM/100APPLE/IMG_0002.JPG": ["5005"],
         "DCIM/100APPLE/IMG_0003.MOV": ["5005"],
-        "DCIM/100APPLE/IMG_0004.HEIC": ["5005", "5003"],  # its original isn't in the backup
-        "PhotoData/CPLAssets/group349/6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9.JPG": ["5003"],  # nor this iCloud one
+        "DCIM/100APPLE/IMG_0004.HEIC": ["5005", "5003"],
+        "DCIM/100APPLE/IMG_0005.HEIC": ["5005"],
+        ICLOUD: ["5003"],
     }
     for original, variants in previews.items():
         for variant in variants:
             fake.file(CAMERA_ROLL, f"Media/PhotoData/Thumbnails/V2/{original}/{variant}.JPG", JPEG)
     fake.file(CAMERA_ROLL, "Media/PhotoData/Thumbnails/V2/thumbnailConfiguration", b"bplist00")
     fake.file(CAMERA_ROLL, "Media/PhotoData/Thumbnails/3303.ithmb", bytes(512))
-    fake.file(CAMERA_ROLL, "Media/PhotoData/Photos.sqlite", b"SQLite format 3\x00")
-    fake.file(CAMERA_ROLL, "Media/PhotoData/Photos.sqlite-wal", b"")
+    if library is not None:
+        for name, data in photos_database(library, keep_in_log=keep_in_log).items():
+            fake.file(CAMERA_ROLL, f"Media/PhotoData/{name}", data)
     fake.file(CAMERA_ROLL, "Media/PhotoData/Mutations/DCIM/100APPLE/IMG_0002/Adjustments/FullSizeRender.jpg", JPEG)
     fake.file("HomeDomain", "Library/SMS/sms.db", b"SQLite format 3\x00")
     fake.file("AppDomain-com.example.notes", "Documents/notes.json", b"{}")

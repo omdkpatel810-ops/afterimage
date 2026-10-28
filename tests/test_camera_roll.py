@@ -71,10 +71,12 @@ def test_scan_sorts_the_camera_roll(phone):
         "Media/DCIM/100APPLE/IMG_0002.JPG": ["5005"],
         "Media/DCIM/100APPLE/IMG_0003.MOV": ["5005"],
         "Media/DCIM/100APPLE/IMG_0004.HEIC": ["5003", "5005"],
+        "Media/DCIM/100APPLE/IMG_0005.HEIC": ["5005"],
         "Media/PhotoData/CPLAssets/group349/6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9.JPG": ["5003"],
     }
     assert roll.without_original() == [
         "Media/DCIM/100APPLE/IMG_0004.HEIC",
+        "Media/DCIM/100APPLE/IMG_0005.HEIC",
         "Media/PhotoData/CPLAssets/group349/6F1E2D3C-4B5A-4978-8695-A4B3C2D1E0F9.JPG",
     ]
     assert [f.name for f in roll.thumbnail_tables] == ["3303.ithmb"]
@@ -82,7 +84,7 @@ def test_scan_sorts_the_camera_roll(phone):
     assert [f.name for f in roll.edits] == ["FullSizeRender.jpg"]
     assert [f.name for f in roll.other] == ["IMG_0002.AAE", "thumbnailConfiguration"]
     assert roll.not_on_disk == []
-    assert roll.total == 16  # every camera roll file, and no folders or other apps' files
+    assert roll.total == 17  # every camera roll file, and no folders or other apps' files
 
 
 def test_files_listed_but_missing_from_the_folder(backups_dir):
