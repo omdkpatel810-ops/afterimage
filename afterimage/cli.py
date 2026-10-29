@@ -12,13 +12,13 @@ from typing import TextIO
 
 from . import __version__
 from .backup import Backup, BackupError, BackupInfo, default_backup_dirs, find_backups, read_info
-from .camera_roll import scan
+from .camera_roll import CameraRoll, scan
+from .export import FOLDERS, SAVED_LABELS, TABLE, ExportError, export
 from .library import (
-    GONE,
-    IN_LIBRARY,
+    HEADINGS,
+    LABELS,
     RECENTLY_DELETED,
     STATUSES,
-    UNKNOWN,
     Asset,
     Leftover,
     Library,
@@ -60,7 +60,7 @@ def main(
     dirs = args.dir or (default_backup_dirs() if backup_dirs is None else backup_dirs)
     try:
         return args.run(args, Context(out, [Path(d).expanduser() for d in dirs], tz))
-    except BackupError as error:
+    except (BackupError, ExportError) as error:
         print(f"error: {error}", file=err)
         return 1
 
@@ -95,6 +95,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     photos.add_argument("--list", action="store_true", help="list the thumbnails whose original isn't in the backup")
     photos.set_defaults(run=_photos)
+    saving = commands.add_parser(
+        "export", parents=[which, where], help="save the leftover thumbnails, with a report page to open"
+    )
+    saving.add_argument(
+        "--out", required=True, metavar="FOLDER", help="a new or empty folder to save them in, outside the backup"
+    )
+    saving.set_defaults(run=_export)
     return parser
 
 
@@ -169,12 +176,7 @@ def _info(args: argparse.Namespace, ctx: Context) -> int:
 def _photos(args: argparse.Namespace, ctx: Context) -> int:
     with Backup(_resolve(args.backup, ctx)) as backup:
         info, roll = backup.info, scan(backup)
-        library, problem = None, None
-        if roll.thumbnails or roll.has_database:
-            try:
-                library = read_library(backup, roll)
-            except LibraryError as error:
-                problem = str(error)
+        library, problem = _read_library(backup, roll)
 
     details = [info.name, f"iOS {info.ios_version or '?'}", f"backed up {_when(info.last_backup, ctx.tz)}"]
     print(" · ".join(details), file=ctx.out)
@@ -250,7 +252,7 @@ def _photos(args: argparse.Namespace, ctx: Context) -> int:
             for line in _table([[a.path.removeprefix("Media/"), _describe(a, None, ctx.tz)] for a in full_size]):
                 print("  " + line, file=ctx.out)
     elif leftovers or full_size:
-        print("Add --list to see them.", file=ctx.out)
+        print("Add --list to see them, or save them with: afterimage export --out FOLDER", file=ctx.out)
     if RECENTLY_DELETED in groups or full_size:
         print(
             "\nRecently Deleted keeps photos for about 30 days. Until then, the phone can restore them at full"
@@ -267,16 +269,52 @@ def _photos(args: argparse.Namespace, ctx: Context) -> int:
     return 0
 
 
-LABELS = {
-    GONE: "No longer in the library: only thumbnails are left",
-    RECENTLY_DELETED: "In Recently Deleted",
-    IN_LIBRARY: "Still in the library, original not in this backup",
-    UNKNOWN: "Deleted, or kept in iCloud",
-}
-HEADINGS = {
-    **LABELS,
-    IN_LIBRARY: "Still in the library; the original isn't in this backup, usually because it's kept in iCloud",
-}
+def _export(args: argparse.Namespace, ctx: Context) -> int:
+    from .report import ORDER
+
+    with Backup(_resolve(args.backup, ctx)) as backup:
+        roll = scan(backup)
+        library, problem = _read_library(backup, roll)
+        if not find_leftovers(roll, library) and not recently_deleted_in_backup(roll, library):
+            print(
+                "Nothing to save: every thumbnail's photo or video is in this backup, and nothing in it is in"
+                " Recently Deleted.",
+                file=ctx.out,
+            )
+            return 0
+        result = export(backup, roll, library, Path(args.out).expanduser(), ctx.tz)
+
+    counts = {status: sum(1 for item in result.saved if item.status == status) for status in ORDER}
+    print(f"Saved {_plural(len(result.saved), 'file')} to {result.folder}:", file=ctx.out)
+    rows = [[SAVED_LABELS[s], f"{n:,}", FOLDERS[s] + "/"] for s, n in counts.items() if n]
+    for line in _table(rows, right={1}) if rows else []:
+        print("  " + line, file=ctx.out)
+    tagged = sum(1 for item in result.saved if item.tagged)
+    print(f"Wrote the date taken or place into {_plural(tagged, 'thumbnail')}.", file=ctx.out)
+    if problem:
+        print(f"{problem} So afterimage couldn't tell what became of each photo.", file=ctx.out)
+    if result.missing:
+        print(
+            f"{_plural(len(result.missing), 'photo or video', 'photos and videos')} couldn't be saved:"
+            " their files are missing from the backup folder.",
+            file=ctx.out,
+        )
+    print(
+        f"\nOpen report.html in your browser to see them all; {TABLE} lists them for a spreadsheet."
+        "\nThis folder holds copies of your photos. Keep it private, and delete it when you're done.",
+        file=ctx.out,
+    )
+    return 0
+
+
+def _read_library(backup: Backup, roll: CameraRoll) -> tuple[Library | None, str | None]:
+    """The Photos library, or None and why not. Not needed when there are no thumbnails to explain."""
+    if not (roll.thumbnails or roll.has_database):
+        return None, None
+    try:
+        return read_library(backup, roll), None
+    except LibraryError as error:
+        return None, str(error)
 
 
 def _database_row(found: bool, library: Library | None) -> list[str]:

@@ -47,6 +47,16 @@ RECENTLY_DELETED = "recently deleted"
 IN_LIBRARY = "in library"
 UNKNOWN = "unknown"
 STATUSES = (GONE, RECENTLY_DELETED, IN_LIBRARY, UNKNOWN)
+LABELS = {
+    GONE: "No longer in the library: only thumbnails are left",
+    RECENTLY_DELETED: "In Recently Deleted",
+    IN_LIBRARY: "Still in the library, original not in this backup",
+    UNKNOWN: "Deleted, or kept in iCloud",
+}
+HEADINGS = {
+    **LABELS,
+    IN_LIBRARY: "Still in the library; the original isn't in this backup, usually because it's kept in iCloud",
+}
 
 
 class LibraryError(Exception):
@@ -212,7 +222,7 @@ def recently_deleted_in_backup(roll: CameraRoll, library: Library | None) -> lis
     """Photos and videos in Recently Deleted whose full-size original is still in the backup."""
     if library is None:
         return []
-    return sorted((a for a in library.assets.values() if a.trashed and a.path in roll.paths), key=lambda a: a.path)
+    return sorted((a for a in library.assets.values() if a.trashed and a.path in roll.by_path), key=lambda a: a.path)
 
 
 def by_status(leftovers: Iterable[Leftover]) -> dict[str, list[Leftover]]:

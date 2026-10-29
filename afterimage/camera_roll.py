@@ -71,7 +71,7 @@ class CameraRoll:
     database: list[BackupFile] = field(default_factory=list)
     other: list[BackupFile] = field(default_factory=list)
     not_on_disk: list[BackupFile] = field(default_factory=list)  # in Manifest.db, missing from the folder
-    paths: set[str] = field(default_factory=set)  # every camera roll file's path, whatever it is
+    by_path: dict[str, BackupFile] = field(default_factory=dict)  # every camera roll file, whatever it is
 
     @property
     def total(self) -> int:
@@ -101,7 +101,7 @@ class CameraRoll:
 
     def without_original(self) -> list[str]:
         """Originals that have previews in the backup but aren't in it themselves."""
-        return sorted(original for original in self.thumbnails if original not in self.paths)
+        return sorted(original for original in self.thumbnails if original not in self.by_path)
 
 
 def scan(backup: Backup) -> CameraRoll:
@@ -112,7 +112,7 @@ def scan(backup: Backup) -> CameraRoll:
         if backup.locate(entry) is None:
             roll.not_on_disk.append(entry)
         path = entry.relative_path
-        roll.paths.add(path)
+        roll.by_path[path] = entry
         if (parsed := parse_thumbnail(path)) is not None:
             original, variant = parsed
             roll.thumbnails.setdefault(original, []).append(Thumbnail(entry, original, variant))

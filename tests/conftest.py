@@ -276,7 +276,9 @@ LIBRARY = [
 ]
 
 
-def add_camera_roll(fake: FakeBackup, library: list[Row] | None = LIBRARY, keep_in_log: bool = True) -> FakeBackup:
+def add_camera_roll(
+    fake: FakeBackup, library: list[Row] | None = LIBRARY, keep_in_log: bool = True, picture: bytes = JPEG
+) -> FakeBackup:
     """A camera roll with its Photos library. Three photos and videos are in the backup with their thumbnails.
 
     Three more have thumbnails but no original: IMG_0004 was deleted for good, IMG_0005 is in Recently
@@ -297,7 +299,7 @@ def add_camera_roll(fake: FakeBackup, library: list[Row] | None = LIBRARY, keep_
     }
     for original, variants in previews.items():
         for variant in variants:
-            fake.file(CAMERA_ROLL, f"Media/PhotoData/Thumbnails/V2/{original}/{variant}.JPG", JPEG)
+            fake.file(CAMERA_ROLL, f"Media/PhotoData/Thumbnails/V2/{original}/{variant}.JPG", picture)
     fake.file(CAMERA_ROLL, "Media/PhotoData/Thumbnails/V2/thumbnailConfiguration", b"bplist00")
     fake.file(CAMERA_ROLL, "Media/PhotoData/Thumbnails/3303.ithmb", bytes(512))
     if library is not None:

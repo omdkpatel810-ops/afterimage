@@ -8,14 +8,14 @@
 
 **Find the photos your iPhone backup still remembers.**
 
-When you delete a photo on an iPhone, the small preview the Photos app made of it doesn't always go with it. Those previews, called thumbnails, end up in the backups your computer makes. Afterimage reads a backup, without changing anything in it, and shows what its camera roll holds: the photos and videos, their thumbnails, and the thumbnails whose photo is no longer there. Then it checks the Photos app's own database to say what became of each one, and when and where it was taken.
+When you delete a photo on an iPhone, the small preview the Photos app made of it doesn't always go with it. Those previews, called thumbnails, end up in the backups your computer makes. Afterimage reads a backup, without changing anything in it, and shows what its camera roll holds: the photos and videos, their thumbnails, and the thumbnails whose photo is no longer there. Then it checks the Photos app's own database to say what became of each one, and when and where it was taken. And it can save them: each thumbnail with its date and place written back in, plus a report page to open in a browser.
 
 That's useful two ways:
 
 - **Get back a lost photo**, as a small copy, when no other copy is left.
 - **Check your own privacy**: see what a backup still holds that you thought was deleted.
 
-> **Status: milestone 2 of 5 is done.** Afterimage finds backups, counts what their camera roll holds, and uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud. Saving the thumbnails and a privacy report come next ([roadmap](#roadmap)).
+> **Status: milestone 3 of 5 is done.** Afterimage finds backups, uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud, and saves what's left with a report page. Encrypted backups come next ([roadmap](#roadmap)).
 
 ```text
 $ afterimage photos --list
@@ -79,11 +79,50 @@ flowchart LR
 
 It also finds the other way round: photos in Recently Deleted whose full-size original is still in the backup.
 
+## Saving what's left
+
+```text
+$ afterimage export --out afterimage
+Saved 4 files to afterimage:
+  No longer in the library: only thumbnails are left  1  only-thumbnails-left/
+  In Recently Deleted                                 1  recently-deleted/
+  In Recently Deleted, full size                      1  recently-deleted-full-size/
+  Still in the library, original not in this backup   1  still-in-library/
+Wrote the date taken or place into 2 thumbnails.
+
+Open report.html in your browser to see them all; afterimage.csv lists them for a spreadsheet.
+This folder holds copies of your photos. Keep it private, and delete it when you're done.
+```
+
+```text
+afterimage/
+├── only-thumbnails-left/IMG_0004 (thumbnail).jpg
+├── recently-deleted/IMG_0005 (thumbnail).jpg
+├── recently-deleted-full-size/IMG_0003.MOV
+├── still-in-library/IMG_4821 (thumbnail).jpg
+├── afterimage.csv
+└── report.html
+```
+
+- **One folder for each thing that could have happened to a photo**, so the ones deleted for good are easy to find.
+- **The sharpest thumbnail.** A photo can have several; the biggest is saved.
+- **The date and place go back in.** Thumbnails in a backup usually carry no date or location, so a photo app would file them under the day they were saved. Afterimage writes the date taken and the GPS position into each one as Exif, with its own small writer ([`exif.py`](afterimage/exif.py), standard library only). The file's time is set to the date taken too. A thumbnail that already has Exif is left as it is, so nothing in it (such as which way up it goes) is lost.
+- **The name it was taken with.** iCloud stores photos under long IDs like `6F1E2D3C-….JPG`. The database remembers the camera's name, so that one is saved as `IMG_4821 (thumbnail).jpg`.
+- **Full size where it still can be.** A photo in Recently Deleted whose original is still in the backup is copied whole, not as a thumbnail.
+
+`report.html` shows everything with its date, place (linked to OpenStreetMap) and what to do next. It loads nothing from the internet, so it works offline and nobody learns it was opened.
+
+![The report page, made from the test backup](docs/report.png)
+
+<sub>The report page for the fake backup the tests build. The pictures are drawn by the tests.</sub>
+
 ## Built to only read
 
 - **Manifest.db is opened read-only and "immutable"**, so SQLite writes nothing, not even a lock or journal file.
 - **Photos.sqlite is read from a copy.** It's copied to a temporary folder together with its write-ahead log (`Photos.sqlite-wal`), so the latest changes still waiting in the log are read too. The copy is deleted afterwards.
 - **Names from the manifest are checked before they're used as paths.** Only 40 hex characters are accepted, so a tampered backup can't point outside its folder with something like `../../`.
+- **Exports never go inside the backup**, or into a folder that already has files in it, so nothing is overwritten.
+- **Names from the backup are made safe before they become file names.** Slashes, `..`, characters Windows forbids and names like `CON` are replaced, so a strange name can't write anywhere else.
 - **A test proves nothing changes.** It fingerprints every file and folder in a backup (contents and modified times) before and after every command.
 - **It never prints the phone's serial number, IMEI or phone number,** though the backup has them. A test checks that too.
 
@@ -104,6 +143,7 @@ pip install -e .
 afterimage list               # the backups on this computer
 afterimage info               # one backup's device, date and contents
 afterimage photos --list      # what its camera roll holds
+afterimage export --out ~/Desktop/afterimage   # save what's left, with a report page
 ```
 
 With more than one backup, name one by its device name, or the start of its folder name: `afterimage photos "Om's iPhone"`. You can also give a backup's folder directly.
@@ -134,16 +174,18 @@ Afterimage is for backups of your own devices, or ones whose owner has asked you
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest --cov     # 116 tests, 100% coverage; fails under 95%
+python -m pytest --cov     # 152 tests, 100% coverage; fails under 95%
 ruff check . && ruff format --check .
 ```
 
-The tests never use a real phone or a real photo. They build backups in code, shaped like the ones Apple's tools make ([`tests/conftest.py`](tests/conftest.py)), and run on Linux, macOS and Windows. Among them:
+The tests never use a real phone or a real photo. (Pillow, used only by the tests, reads back the Exif Afterimage writes, the way a photo app would.) They build backups in code, shaped like the ones Apple's tools make ([`tests/conftest.py`](tests/conftest.py)), and run on Linux, macOS and Windows. Among them:
 
 - **File names match the published ones.** The SHA-1 names for `sms.db`, the contacts database and `Photos.sqlite` are checked against the ones forensic tools look up.
 - **Nothing is written,** by any command (see above).
 - **Tampered names can't escape the folder.** Manifest entries like `../../secret.txt` are refused.
 - **The write-ahead log is read.** A fake Photos database keeps its rows only in `Photos.sqlite-wal`, as a phone can. Afterimage finds them, and the same database without its log has none.
+- **Photo apps can read what's written.** Pillow reads back every date and place written into a saved thumbnail. A property-based test (Hypothesis) checks that any place on Earth comes back to within about 3 cm.
+- **The report can't be tricked.** A photo named `<img src=x onerror=...>` and a phone named `<b>Om</b>` show up as text on the page, and as harmless file names.
 - **Older iPhones work too.** The `ZGENERICASSET` table from iOS 13 and earlier reads the same as `ZASSET`.
 - **Path prefixes match exactly.** A property-based test (Hypothesis) checks that case counts and that `%` and `_` are ordinary characters, both of which SQL's `LIKE` gets wrong.
 - **Any file record reads back.** Another property-based test archives random paths, sizes and dates, in any language, and decodes them.
@@ -152,7 +194,7 @@ The tests never use a real phone or a real photo. They build backups in code, sh
 
 - [x] **1. Read a backup:** find it, read Manifest.db, list its photos and thumbnails without changing anything
 - [x] **2. Match thumbnails to Photos.sqlite:** dates, places, and which photos were deleted
-- [ ] **3. Export:** save the leftover thumbnails with their dates and places, plus a privacy report page
+- [x] **3. Export:** save the leftover thumbnails with their dates and places, plus a privacy report page
 - [ ] **4. Encrypted backups,** unlocked with the owner's own backup password
 - [ ] **5. Ship it**
 

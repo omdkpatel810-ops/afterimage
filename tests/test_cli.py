@@ -170,7 +170,11 @@ RESTORE_TIP = [
 def test_photos(phone, backups_dir):
     code, out, err = run("photos", backups_dir=backups_dir)  # the only backup, so no need to name it
     assert (code, err) == (0, "")
-    assert out.splitlines() == [*SUMMARY, "Add --list to see them.", *RESTORE_TIP]
+    assert out.splitlines() == [
+        *SUMMARY,
+        "Add --list to see them, or save them with: afterimage export --out FOLDER",
+        *RESTORE_TIP,
+    ]
 
 
 def test_photos_list(phone):
