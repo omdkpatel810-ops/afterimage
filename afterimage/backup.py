@@ -23,10 +23,12 @@ import plistlib
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -153,20 +155,43 @@ def find_backups(dirs: Iterable[str | os.PathLike[str]]) -> Search:
 
 @dataclass(frozen=True)
 class BackupFile:
-    """One row of Manifest.db: a file, folder or link on the phone."""
+    """One row of Manifest.db: a file, folder or link on the phone.
+
+    Its size, dates and key are in an archived record that's only decoded when one of them is asked for:
+    decoding is most of the work in reading a big backup, and sorting a camera roll needs only the paths.
+    """
 
     file_id: str
     domain: str
     relative_path: str
     kind: str  # "file", "folder", "link" or "other"
-    size: int | None = None
-    modified: datetime | None = None
-    protection_class: int | None = field(default=None, repr=False)  # encrypted backups only
-    wrapped_key: bytes | None = field(default=None, repr=False)  # the file's own key, wrapped
+    record: bytes | None = field(default=None, repr=False, compare=False)
 
     @property
     def name(self) -> str:
         return self.relative_path.rpartition("/")[2]
+
+    @property
+    def size(self) -> int | None:
+        return self._details[0]
+
+    @property
+    def modified(self) -> datetime | None:
+        return self._details[1]
+
+    @property
+    def protection_class(self) -> int | None:
+        """Encrypted backups only: which class key unwraps this file's key."""
+        return self._details[2]
+
+    @property
+    def wrapped_key(self) -> bytes | None:
+        """Encrypted backups only: this file's own key, wrapped."""
+        return self._details[3]
+
+    @cached_property
+    def _details(self) -> tuple[int | None, datetime | None, int | None, bytes | None]:
+        return _decode_record(self.record)
 
 
 class Backup:
@@ -277,15 +302,22 @@ class Backup:
         return counts
 
     def locate(self, entry: BackupFile) -> Path | None:
-        """Where a file's contents are in the backup folder, or None if they aren't there.
+        """Where a file's contents are in the backup folder, or None if they aren't there."""
+        return self.path / entry.file_id[:2] / entry.file_id if self.stat(entry) is not None else None
+
+    def stat(self, entry: BackupFile) -> os.stat_result | None:
+        """The stored file's details (size and so on), or None if it isn't in the backup folder.
 
         The name comes from Manifest.db, so it's checked first: anything but 40 hex digits could point
         outside the backup (think "../../").
         """
         if not _FILE_ID.fullmatch(entry.file_id):
             return None
-        candidate = self.path / entry.file_id[:2] / entry.file_id
-        return candidate if candidate.is_file() else None
+        try:
+            found = os.stat(os.path.join(self.path, entry.file_id[:2], entry.file_id))
+        except OSError:
+            return None
+        return found if stat.S_ISREG(found.st_mode) else None
 
     def read(self, entry: BackupFile) -> bytes:
         """A file's contents, decrypted if the backup is encrypted."""
@@ -325,31 +357,24 @@ class Backup:
 
 def _to_file(row: tuple[Any, ...]) -> BackupFile:
     fid, domain, relative_path, flags, blob = row
-    size = modified = protection_class = wrapped_key = None
-    if isinstance(blob, bytes):
-        try:
-            details = unarchive(blob)
-        except ArchiveError:
-            details = None
-        if isinstance(details, dict):
-            raw_size = details.get("Size")
-            if isinstance(raw_size, int) and not isinstance(raw_size, bool) and raw_size >= 0:
-                size = raw_size
-            modified = _from_unix(details.get("LastModified"))
-            raw_class, raw_key = details.get("ProtectionClass"), details.get("EncryptionKey")
-            if isinstance(raw_class, int) and not isinstance(raw_class, bool):
-                protection_class = raw_class
-            if isinstance(raw_key, bytes) and len(raw_key) > 4:  # 4 bytes of class, then the wrapped key
-                wrapped_key = raw_key[4:]
-    return BackupFile(
-        str(fid or ""),
-        str(domain or ""),
-        str(relative_path or ""),
-        _KINDS.get(flags, "other"),
-        size,
-        modified,
-        protection_class,
-        wrapped_key,
+    record = blob if isinstance(blob, bytes) else None
+    return BackupFile(str(fid or ""), str(domain or ""), str(relative_path or ""), _KINDS.get(flags, "other"), record)
+
+
+def _decode_record(record: bytes | None) -> tuple[int | None, datetime | None, int | None, bytes | None]:
+    """Size, modified time, protection class and wrapped key from a file's archived MBFile record."""
+    try:
+        details = unarchive(record) if record is not None else None
+    except ArchiveError:
+        details = None
+    if not isinstance(details, dict):
+        return None, None, None, None
+    size, protection_class, key = details.get("Size"), details.get("ProtectionClass"), details.get("EncryptionKey")
+    return (
+        size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
+        _from_unix(details.get("LastModified")),
+        protection_class if isinstance(protection_class, int) and not isinstance(protection_class, bool) else None,
+        key[4:] if isinstance(key, bytes) and len(key) > 4 else None,  # 4 bytes of class, then the wrapped key
     )
 
 

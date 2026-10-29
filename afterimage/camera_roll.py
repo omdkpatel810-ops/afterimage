@@ -72,6 +72,7 @@ class CameraRoll:
     other: list[BackupFile] = field(default_factory=list)
     not_on_disk: list[BackupFile] = field(default_factory=list)  # in Manifest.db, missing from the folder
     by_path: dict[str, BackupFile] = field(default_factory=dict)  # every camera roll file, whatever it is
+    stored_sizes: dict[str, int] = field(default_factory=dict)  # bytes in the backup folder, unencrypted only
 
     @property
     def total(self) -> int:
@@ -89,7 +90,7 @@ class CameraRoll:
 
     @property
     def originals_size(self) -> int:
-        return sum(f.size or 0 for f in self.originals)
+        return sum(self.stored_sizes.get(f.relative_path, f.size or 0) for f in self.originals)
 
     @property
     def has_database(self) -> bool:
@@ -109,9 +110,12 @@ def scan(backup: Backup) -> CameraRoll:
     for entry in backup.files(DOMAIN):
         if entry.kind != "file":
             continue
-        if backup.locate(entry) is None:
-            roll.not_on_disk.append(entry)
         path = entry.relative_path
+        found = backup.stat(entry)
+        if found is None:
+            roll.not_on_disk.append(entry)
+        elif not backup.encrypted:  # an encrypted file is padded, so its stored size isn't quite its own
+            roll.stored_sizes[path] = found.st_size
         roll.by_path[path] = entry
         if (parsed := parse_thumbnail(path)) is not None:
             original, variant = parsed

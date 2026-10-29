@@ -183,18 +183,15 @@ def test_files_by_domain_and_prefix(phone):
         "Media/DCIM/100APPLE/IMG_0002.JPG",
         "Media/DCIM/100APPLE/IMG_0003.MOV",
     ]
-    assert sms == [
-        BackupFile(
-            file_id="3d0d7e5fb2ce288813306e4d4636395e047a3d28",
-            domain="HomeDomain",
-            relative_path="Library/SMS/sms.db",
-            kind="file",
-            size=16,
-            modified=datetime(2026, 10, 19, 21, 14, tzinfo=timezone.utc),
-            protection_class=3,
-        )
-    ]
-    assert sms[0].name == "sms.db"
+    assert sms == [BackupFile("3d0d7e5fb2ce288813306e4d4636395e047a3d28", "HomeDomain", "Library/SMS/sms.db", "file")]
+    record = sms[0]
+    assert (record.name, record.size, record.modified, record.protection_class, record.wrapped_key) == (
+        "sms.db",
+        16,
+        datetime(2026, 10, 19, 21, 14, tzinfo=timezone.utc),
+        3,
+        None,
+    )
 
 
 def test_counts(phone):
