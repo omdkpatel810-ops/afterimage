@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import shlex
+import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -367,11 +369,16 @@ def _demo(args: argparse.Namespace, ctx: Context) -> int:
     backup = build_demo_backup(folder / "backup")
     print(f"Made a sample backup in {backup}. It's made up: no real phone or photos are in it.\n", file=ctx.out)
     for argv in (["photos", str(backup), "--list"], ["export", str(backup), "--out", str(folder / "export")]):
-        print("$ afterimage " + " ".join(shlex.quote(part) for part in argv), file=ctx.out)
+        print(f"$ afterimage {_command_line(argv)}", file=ctx.out)
         main(argv, out=ctx.out, err=ctx.err, backup_dirs=[], tz=ctx.tz)
         print(file=ctx.out)
     print(f"The report: {folder / 'export' / 'report.html'}", file=ctx.out)
     return 0
+
+
+def _command_line(argv: list[str], system: str = os.name) -> str:
+    """Arguments quoted the way this system's shell expects, so the demo's commands can be pasted."""
+    return subprocess.list2cmdline(argv) if system == "nt" else " ".join(shlex.quote(part) for part in argv)
 
 
 def _read_library(backup: Backup, roll: CameraRoll) -> tuple[Library | None, str | None]:

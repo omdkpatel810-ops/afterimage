@@ -213,7 +213,7 @@ Afterimage is for backups of your own devices, or ones whose owner has asked you
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest --cov     # 189 tests, 100% coverage; fails under 95%
+python -m pytest --cov     # 190 tests, 100% coverage; fails under 95%
 ruff check . && ruff format --check .
 ```
 

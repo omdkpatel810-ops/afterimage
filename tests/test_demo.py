@@ -6,7 +6,7 @@ from datetime import timezone
 
 from PIL import Image
 
-from afterimage.cli import main
+from afterimage.cli import _command_line, main
 from afterimage.demo import picture
 
 
@@ -23,7 +23,7 @@ def test_the_demo_runs_end_to_end(tmp_path):
     assert (code, err) == (0, "")
     lines = out.splitlines()
     assert lines[0].startswith(f"Made a sample backup in {folder / 'backup'}")
-    assert f"$ afterimage export {folder / 'backup'}" in out
+    assert "$ afterimage export " in out and str(folder / "export") in out
     assert "  Photos database    found  5 photos and videos, 2 in Recently Deleted, 1 hidden" in lines
     assert lines[-1] == f"The report: {folder / 'export' / 'report.html'}"
     page = (folder / "export" / "report.html").read_text(encoding="utf-8")
@@ -46,3 +46,9 @@ def test_the_demo_wont_mix_with_other_files(tmp_path):
 def test_the_pictures_ship_with_the_package():
     for name in ("sunset", "meadow", "night", "lake"):
         assert picture(name).startswith(b"\xff\xd8\xff")
+
+
+def test_the_demo_quotes_commands_for_the_system_it_runs_on():
+    argv = ["photos", "C:\\Users\\Om Patel\\backup", "--list"]
+    assert _command_line(argv, "nt") == 'photos "C:\\Users\\Om Patel\\backup" --list'
+    assert _command_line(["photos", "/home/om/my backup"], "posix") == "photos '/home/om/my backup'"
