@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import shlex
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -65,7 +66,7 @@ def main(
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     args = _parser().parse_args(argv)
-    dirs = args.dir or (default_backup_dirs() if backup_dirs is None else backup_dirs)
+    dirs = getattr(args, "dir", None) or (default_backup_dirs() if backup_dirs is None else backup_dirs)
     password = ask_password or _ask_password
     if getattr(args, "password_stdin", False):
         reader = sys.stdin if stdin is None else stdin
@@ -144,6 +145,14 @@ def _parser() -> argparse.ArgumentParser:
         "--out", required=True, metavar="FOLDER", help="a new or empty folder to save them in, outside the backup"
     )
     saving.set_defaults(run=_export)
+    demo = commands.add_parser("demo", help="try it on a made-up backup: no iPhone or real photos needed")
+    demo.add_argument(
+        "folder",
+        nargs="?",
+        default="afterimage-demo",
+        help="a new or empty folder for the sample backup and what's saved from it (default: afterimage-demo)",
+    )
+    demo.set_defaults(run=_demo)
     return parser
 
 
@@ -346,6 +355,22 @@ def _export(args: argparse.Namespace, ctx: Context) -> int:
         "\nThis folder holds copies of your photos. Keep it private, and delete it when you're done.",
         file=ctx.out,
     )
+    return 0
+
+
+def _demo(args: argparse.Namespace, ctx: Context) -> int:
+    from .demo import build_demo_backup
+
+    folder = Path(args.folder).expanduser()
+    if folder.exists() and (not folder.is_dir() or any(folder.iterdir())):
+        raise ExportError(f"{folder} already has files in it. Pick a new or empty folder for the demo.")
+    backup = build_demo_backup(folder / "backup")
+    print(f"Made a sample backup in {backup}. It's made up: no real phone or photos are in it.\n", file=ctx.out)
+    for argv in (["photos", str(backup), "--list"], ["export", str(backup), "--out", str(folder / "export")]):
+        print("$ afterimage " + " ".join(shlex.quote(part) for part in argv), file=ctx.out)
+        main(argv, out=ctx.out, err=ctx.err, backup_dirs=[], tz=ctx.tz)
+        print(file=ctx.out)
+    print(f"The report: {folder / 'export' / 'report.html'}", file=ctx.out)
     return 0
 
 

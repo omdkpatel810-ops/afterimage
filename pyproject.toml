@@ -33,6 +33,9 @@ afterimage = "afterimage.cli:main"
 [tool.setuptools]
 packages = ["afterimage"]
 
+[tool.setuptools.package-data]
+afterimage = ["pictures/*.jpg"]  # the demo's drawn pictures
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = [".", "tests"]
