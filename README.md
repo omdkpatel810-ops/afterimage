@@ -8,6 +8,8 @@
 
 **Find the photos your iPhone backup still remembers.**
 
+![afterimage demo, then the report page it makes](docs/demo.gif)
+
 When you delete a photo on an iPhone, the small preview the Photos app made of it doesn't always go with it. Those previews, called thumbnails, end up in the backups your computer makes. Afterimage reads a backup, without changing anything in it, and shows what its camera roll holds: the photos and videos, their thumbnails, and the thumbnails whose photo is no longer there. Then it checks the Photos app's own database to say what became of each one, and when and where it was taken. And it can save them: each thumbnail with its date and place written back in, plus a report page to open in a browser. Encrypted backups open with their own password.
 
 That's useful two ways:
@@ -15,7 +17,15 @@ That's useful two ways:
 - **Get back a lost photo**, as a small copy, when no other copy is left.
 - **Check your own privacy**: see what a backup still holds that you thought was deleted.
 
-> **Status: milestone 4 of 5 is done.** Afterimage finds backups, opens encrypted ones with their password, uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud, and saves what's left with a report page ([roadmap](#roadmap)).
+**Try it in one command**, with no iPhone and no real photos: it builds a made-up backup, reads it, and saves what's left with a report page.
+
+```bash
+uvx --from git+https://github.com/omdkpatel810-ops/afterimage afterimage demo
+```
+
+(Or `pip install git+https://github.com/omdkpatel810-ops/afterimage`, then `afterimage demo`.)
+
+> **Status: 1.0, complete.** Afterimage finds backups, opens encrypted ones with their password, uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud, and saves what's left with a report page. It's fast on a full-size backup ([numbers](#speed)) and tested on Linux, macOS and Windows.
 
 ```text
 $ afterimage photos --list
@@ -112,9 +122,9 @@ afterimage/
 
 `report.html` shows everything with its date, place (linked to OpenStreetMap) and what to do next. It loads nothing from the internet, so it works offline and nobody learns it was opened.
 
-![The report page, made from the test backup](docs/report.png)
+![The report page, made from the demo backup](docs/report.png)
 
-<sub>The report page for the fake backup the tests build. The pictures are drawn by the tests.</sub>
+<sub>The report page for the demo backup. Its pictures are simple drawings.</sub>
 
 ## Encrypted backups
 
@@ -152,10 +162,8 @@ Requires Python 3.10 or newer, and nothing else: only the standard library is us
 **2. Run it.**
 
 ```bash
-git clone https://github.com/omdkpatel810-ops/afterimage.git
-cd afterimage
-python3 -m venv .venv && source .venv/bin/activate
-pip install -e ".[encrypted]"   # or just -e . if your backups aren't encrypted
+pip install "afterimage[encrypted] @ git+https://github.com/omdkpatel810-ops/afterimage"
+# ([encrypted] adds the one package encrypted backups need; leave it out if yours aren't)
 
 afterimage list               # the backups on this computer
 afterimage info               # one backup's device, date and contents
@@ -176,6 +184,19 @@ Afterimage looks for backups where Apple's tools keep them:
 
 On a Mac, macOS keeps that folder private: give your terminal app **Full Disk Access** (System Settings → Privacy & Security → Full Disk Access) first. Afterimage says so if it's blocked.
 
+## Speed
+
+Measured with [`scripts/benchmark.py`](scripts/benchmark.py), which builds a made-up backup the size of a well-used iPhone's (92,001 files, 20,000 photos with two thumbnails each, 2,000 leftover thumbnails, and other apps' files) and times each step. On a 2.8 GHz Xeon cloud machine with two cores, Python 3.13, best of three:
+
+| Step | Time |
+| --- | ---: |
+| Open the backup and sort its camera roll | 0.91 s |
+| …and read the Photos database (20,000 photos) | 1.02 s |
+| …and save 2,000 leftover thumbnails with a report | 1.68 s |
+| Unlock an encrypted backup with Apple's settings (10M + 10k PBKDF2 rounds) | 7.42 s |
+
+The first version took 5.98 s to sort the same camera roll. A profile showed 80% of that went on decoding every file's archived record, though sorting needs only the paths, so records are now decoded only when something asks for them: **6.6 times faster**. Unlocking is slow on purpose: it's Apple's ten million rounds of PBKDF2, which make guessing a password slow too.
+
 ## What it can't do
 
 - **Bring back the full-size original.** Once a photo is permanently deleted, the original is gone. What can remain is a thumbnail: a small preview, not the photo.
@@ -192,11 +213,11 @@ Afterimage is for backups of your own devices, or ones whose owner has asked you
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest --cov     # 185 tests, 100% coverage; fails under 95%
+python -m pytest --cov     # 189 tests, 100% coverage; fails under 95%
 ruff check . && ruff format --check .
 ```
 
-The tests never use a real phone or a real photo. (Pillow, used only by the tests, reads back the Exif Afterimage writes, the way a photo app would.) They build backups in code, shaped like the ones Apple's tools make ([`tests/conftest.py`](tests/conftest.py)), and run on Linux, macOS and Windows. Among them:
+The tests never use a real phone or a real photo. (Pillow, used only by the tests, reads back the Exif Afterimage writes, the way a photo app would.) They build backups in code, shaped like the ones Apple's tools make ([`afterimage/sample.py`](afterimage/sample.py), which `afterimage demo` uses too), and run on Linux, macOS and Windows. Among them:
 
 - **File names match the published ones.** The SHA-1 names for `sms.db`, the contacts database and `Photos.sqlite` are checked against the ones forensic tools look up.
 - **Nothing is written,** by any command (see above).
@@ -216,7 +237,7 @@ The tests never use a real phone or a real photo. (Pillow, used only by the test
 - [x] **2. Match thumbnails to Photos.sqlite:** dates, places, and which photos were deleted
 - [x] **3. Export:** save the leftover thumbnails with their dates and places, plus a privacy report page
 - [x] **4. Encrypted backups,** unlocked with the owner's own backup password
-- [ ] **5. Ship it**
+- [x] **5. Ship it:** a one-command demo, a speed benchmark, and version 1.0
 
 ## Background
 
