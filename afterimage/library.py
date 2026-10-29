@@ -16,7 +16,6 @@ beside it, so SQLite applies the changes still waiting in the log. Nothing in th
 
 from __future__ import annotations
 
-import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterable
@@ -25,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .backup import Backup
+from .backup import Backup, BackupError
 from .camera_roll import DATABASE, CameraRoll, Thumbnail
 
 CORE_DATA_EPOCH = datetime(2001, 1, 1, tzinfo=timezone.utc)  # Apple stores dates as seconds since this
@@ -107,17 +106,18 @@ def read_library(backup: Backup, roll: CameraRoll) -> Library:
     database = roll.database_file(DATABASE[0])
     if database is None:
         raise LibraryError("The Photos database (Photos.sqlite) isn't in this backup.")
-    source = backup.locate(database)
-    if source is None:
+    if backup.locate(database) is None:
         raise LibraryError("The Photos database is listed in this backup, but its file is missing.")
     log = roll.database_file(DATABASE[1])
-    log_source = backup.locate(log) if log is not None else None
 
     with tempfile.TemporaryDirectory(prefix="afterimage-") as folder:
         copy = Path(folder) / "Photos.sqlite"
-        shutil.copyfile(source, copy)
-        if log_source is not None:
-            shutil.copyfile(log_source, Path(folder) / "Photos.sqlite-wal")
+        try:
+            backup.copy(database, copy)  # decrypted on the way, if the backup is encrypted
+            if log is not None and backup.locate(log) is not None:
+                backup.copy(log, Path(folder) / "Photos.sqlite-wal")
+        except BackupError as error:
+            raise LibraryError(f"The Photos database couldn't be read. {error}") from error
         db = sqlite3.connect(copy)
         try:
             return _read(db)

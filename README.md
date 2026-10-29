@@ -3,19 +3,19 @@
 [![tests](https://github.com/omdkpatel810-ops/afterimage/actions/workflows/tests.yml/badge.svg)](https://github.com/omdkpatel810-ops/afterimage/actions/workflows/tests.yml)
 ![coverage 100%](https://img.shields.io/badge/coverage-100%25-brightgreen)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![no dependencies](https://img.shields.io/badge/dependencies-none-blue)
+![no required dependencies](https://img.shields.io/badge/required%20dependencies-none-blue)
 [![MIT license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 **Find the photos your iPhone backup still remembers.**
 
-When you delete a photo on an iPhone, the small preview the Photos app made of it doesn't always go with it. Those previews, called thumbnails, end up in the backups your computer makes. Afterimage reads a backup, without changing anything in it, and shows what its camera roll holds: the photos and videos, their thumbnails, and the thumbnails whose photo is no longer there. Then it checks the Photos app's own database to say what became of each one, and when and where it was taken. And it can save them: each thumbnail with its date and place written back in, plus a report page to open in a browser.
+When you delete a photo on an iPhone, the small preview the Photos app made of it doesn't always go with it. Those previews, called thumbnails, end up in the backups your computer makes. Afterimage reads a backup, without changing anything in it, and shows what its camera roll holds: the photos and videos, their thumbnails, and the thumbnails whose photo is no longer there. Then it checks the Photos app's own database to say what became of each one, and when and where it was taken. And it can save them: each thumbnail with its date and place written back in, plus a report page to open in a browser. Encrypted backups open with their own password.
 
 That's useful two ways:
 
 - **Get back a lost photo**, as a small copy, when no other copy is left.
 - **Check your own privacy**: see what a backup still holds that you thought was deleted.
 
-> **Status: milestone 3 of 5 is done.** Afterimage finds backups, uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud, and saves what's left with a report page. Encrypted backups come next ([roadmap](#roadmap)).
+> **Status: milestone 4 of 5 is done.** Afterimage finds backups, opens encrypted ones with their password, uses the Photos database to tell deleted photos from ones in Recently Deleted or kept in iCloud, and saves what's left with a report page ([roadmap](#roadmap)).
 
 ```text
 $ afterimage photos --list
@@ -116,6 +116,23 @@ afterimage/
 
 <sub>The report page for the fake backup the tests build. The pictures are drawn by the tests.</sub>
 
+## Encrypted backups
+
+An encrypted backup is the safer kind to keep, and Afterimage opens it with its backup password: the one chosen when "Encrypt local backup" was turned on, which isn't the phone's passcode. It asks for it without showing what you type, or reads it from standard input with `--password-stdin`.
+
+```mermaid
+flowchart LR
+    password["Backup password"] -->|"PBKDF2-SHA256, ~10M rounds<br/>then PBKDF2-SHA1"| pkey["Password key"]
+    pkey -->|"AES key unwrap"| classes["Class keys<br/>(Manifest.plist keybag)"]
+    classes -->|"AES key unwrap"| mkey["Manifest key"] -->|"AES-256-CBC"| manifest[("Manifest.db")]
+    classes -->|"AES key unwrap"| fkey["Each file's key<br/>(in Manifest.db)"] -->|"AES-256-CBC"| file["The file"]
+```
+
+1. **The password unlocks a keybag.** `Manifest.plist` holds a keybag of "class keys", each wrapped (AES key wrap, RFC 3394) with a key made from the password. Making that key takes two rounds of PBKDF2, the first about ten million iterations long, so unlocking takes a few seconds. That's Apple's defence against guessing, and Afterimage doesn't try to get around it: it only ever uses the password it's given.
+2. **The class keys unlock the list of files, then each file.** `Manifest.db` is encrypted with its own key, wrapped by a class key. Each file has its own key too, kept wrapped in its `Manifest.db` record. Afterimage reads the keybag with its own code ([`crypto.py`](afterimage/crypto.py)). The password steps use the standard library; the AES steps use the [`cryptography`](https://cryptography.io) package, the one optional dependency.
+3. **Nothing is kept.** The password is used once, to make the key. The decrypted `Manifest.db` goes in a private temporary folder that's deleted when the backup is closed, and other files are decrypted as they're read. The backup itself still isn't changed.
+4. **Checked against an independent decrypter.** The tests build encrypted backups the way Apple does, then check that every file Afterimage decrypts matches what [iphone_backup_decrypt](https://github.com/jsharkey13/iphone_backup_decrypt), an established open-source tool, gets from the same backup.
+
 ## Built to only read
 
 - **Manifest.db is opened read-only and "immutable"**, so SQLite writes nothing, not even a lock or journal file.
@@ -130,7 +147,7 @@ afterimage/
 
 Requires Python 3.10 or newer, and nothing else: only the standard library is used.
 
-**1. Make a backup.** Connect your iPhone, open Finder (Mac) or the Apple Devices app or iTunes (Windows), and back it up to this computer. Afterimage reads unencrypted backups for now. If yours is encrypted, keep it that way: opening encrypted backups with their own password is milestone 4.
+**1. Make a backup.** Connect your iPhone, open Finder (Mac) or the Apple Devices app or iTunes (Windows), and back it up to this computer. Encrypted or not, both work.
 
 **2. Run it.**
 
@@ -138,7 +155,7 @@ Requires Python 3.10 or newer, and nothing else: only the standard library is us
 git clone https://github.com/omdkpatel810-ops/afterimage.git
 cd afterimage
 python3 -m venv .venv && source .venv/bin/activate
-pip install -e .
+pip install -e ".[encrypted]"   # or just -e . if your backups aren't encrypted
 
 afterimage list               # the backups on this computer
 afterimage info               # one backup's device, date and contents
@@ -163,18 +180,19 @@ On a Mac, macOS keeps that folder private: give your terminal app **Full Disk Ac
 
 - **Bring back the full-size original.** Once a photo is permanently deleted, the original is gone. What can remain is a thumbnail: a small preview, not the photo.
 - **Promise there's anything left.** Whether leftover thumbnails exist depends on the iOS version, iCloud Photos settings, and how long ago the photo was deleted.
-- **Read encrypted backups yet** (milestone 4), or backups made by iOS 9 or earlier.
+- **Open an encrypted backup without its password.** There's no guessing and no way around it.
+- **Read backups made by iOS 9 or earlier.**
 - **Read a phone directly.** It reads backups that are already on your computer.
 
 ## Use it on your own backups
 
-Afterimage is for backups of your own devices, or ones whose owner has asked you to look. It doesn't get around passwords or encryption, and it never will: an encrypted backup will need its own backup password, the one Finder or iTunes asked for when encryption was turned on.
+Afterimage is for backups of your own devices, or ones whose owner has asked you to look. It doesn't get around passwords or encryption, and it never will: an encrypted backup needs its own backup password, the one Finder or iTunes asked for when encryption was turned on. It doesn't guess passwords, and it refuses a backup whose key settings have been tampered with to make it work for hours.
 
 ## Tests
 
 ```bash
 pip install -e ".[dev]"
-python -m pytest --cov     # 152 tests, 100% coverage; fails under 95%
+python -m pytest --cov     # 185 tests, 100% coverage; fails under 95%
 ruff check . && ruff format --check .
 ```
 
@@ -186,6 +204,8 @@ The tests never use a real phone or a real photo. (Pillow, used only by the test
 - **The write-ahead log is read.** A fake Photos database keeps its rows only in `Photos.sqlite-wal`, as a phone can. Afterimage finds them, and the same database without its log has none.
 - **Photo apps can read what's written.** Pillow reads back every date and place written into a saved thumbnail. A property-based test (Hypothesis) checks that any place on Earth comes back to within about 3 cm.
 - **The report can't be tricked.** A photo named `<img src=x onerror=...>` and a phone named `<b>Om</b>` show up as text on the page, and as harmless file names.
+- **Encrypted and plain backups tell the same story.** The same camera roll, backed up both ways, gives exactly the same report, and every decrypted file matches [iphone_backup_decrypt](https://github.com/jsharkey13/iphone_backup_decrypt).
+- **Bad passwords and damaged backups fail clearly.** A wrong password, a tampered keybag, a truncated file or a missing key each get a plain message, and a damaged photo is left out of an export instead of stopping it.
 - **Older iPhones work too.** The `ZGENERICASSET` table from iOS 13 and earlier reads the same as `ZASSET`.
 - **Path prefixes match exactly.** A property-based test (Hypothesis) checks that case counts and that `%` and `_` are ordinary characters, both of which SQL's `LIKE` gets wrong.
 - **Any file record reads back.** Another property-based test archives random paths, sizes and dates, in any language, and decodes them.
@@ -195,7 +215,7 @@ The tests never use a real phone or a real photo. (Pillow, used only by the test
 - [x] **1. Read a backup:** find it, read Manifest.db, list its photos and thumbnails without changing anything
 - [x] **2. Match thumbnails to Photos.sqlite:** dates, places, and which photos were deleted
 - [x] **3. Export:** save the leftover thumbnails with their dates and places, plus a privacy report page
-- [ ] **4. Encrypted backups,** unlocked with the owner's own backup password
+- [x] **4. Encrypted backups,** unlocked with the owner's own backup password
 - [ ] **5. Ship it**
 
 ## Background

@@ -212,7 +212,7 @@ def test_files_missing_from_the_backup_folder(backups_dir, tmp_path):
         fake.file(CAMERA_ROLL, f"Media/PhotoData/{name}", data)
     _, text, _ = run("export", str(fake.build()), "--out", str(tmp_path / "saved"), dirs=[])
     assert text.splitlines()[0] == f"Saved 0 files to {tmp_path / 'saved'}:"
-    assert "2 photos and videos couldn't be saved: their files are missing from the backup folder." in text
+    assert "2 photos and videos couldn't be saved: their files are missing from the backup folder, or damaged." in text
 
 
 def test_nothing_to_save(backups_dir, tmp_path):

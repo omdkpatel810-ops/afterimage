@@ -11,12 +11,11 @@ from __future__ import annotations
 import csv
 import os
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, tzinfo
 from pathlib import Path
 
-from .backup import Backup, BackupInfo
+from .backup import Backup, BackupError, BackupInfo
 from .camera_roll import CameraRoll, Thumbnail
 from .exif import add_exif, is_jpeg
 from .library import (
@@ -92,9 +91,13 @@ def export(backup: Backup, roll: CameraRoll, library: Library | None, folder: Pa
         if best is None:
             result.missing.append(leftover.original)
             continue
-        thumbnail, source = best
+        thumbnail = best
         asset = leftover.asset
-        data = source.read_bytes()
+        try:
+            data = backup.read(thumbnail.file)
+        except BackupError:
+            result.missing.append(leftover.original)
+            continue
         tagged = add_exif(
             data,
             taken=asset.taken if asset else None,
@@ -109,14 +112,18 @@ def export(backup: Backup, roll: CameraRoll, library: Library | None, folder: Pa
         )
 
     for asset in recently_deleted_in_backup(roll, library):
-        source = backup.locate(roll.by_path[asset.path])
-        if source is None:
+        entry = roll.by_path[asset.path]
+        if backup.locate(entry) is None:
             result.missing.append(asset.path)
             continue
         name = names.claim(FOLDERS[FULL_SIZE], asset.path.rpartition("/")[2])
         target = folder / name
         target.parent.mkdir(exist_ok=True)
-        shutil.copyfile(source, target)
+        try:
+            backup.copy(entry, target)
+        except BackupError:
+            result.missing.append(asset.path)
+            continue
         _set_time(target, asset.taken)
         result.saved.append(Saved(name, FULL_SIZE, asset.path, asset))
 
@@ -125,10 +132,11 @@ def export(backup: Backup, roll: CameraRoll, library: Library | None, folder: Pa
     return result
 
 
-def _largest(backup: Backup, thumbnails: tuple[Thumbnail, ...]) -> tuple[Thumbnail, Path] | None:
+def _largest(backup: Backup, thumbnails: tuple[Thumbnail, ...]) -> Thumbnail | None:
     """The biggest of a photo's thumbnails that's really in the backup folder: usually the sharpest."""
     found = [(t, path) for t in thumbnails if (path := backup.locate(t.file)) is not None]
-    return max(found, key=lambda pair: pair[1].stat().st_size, default=None)
+    best = max(found, key=lambda pair: pair[1].stat().st_size, default=None)
+    return best[0] if best else None
 
 
 def _stem(original: str, asset: Asset | None) -> str:

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import TextIO
 
 from . import __version__
-from .backup import Backup, BackupError, BackupInfo, default_backup_dirs, find_backups, read_info
+from .backup import Backup, BackupError, BackupInfo, PasswordNeeded, default_backup_dirs, find_backups, read_info
 from .camera_roll import CameraRoll, scan
 from .export import FOLDERS, SAVED_LABELS, TABLE, ExportError, export
 from .library import (
@@ -39,11 +40,16 @@ NO_STANDARD_PLACE = (
 )
 
 
+PasswordSource = Callable[[BackupInfo], "str | None"]
+
+
 @dataclass(frozen=True)
 class Context:
     out: TextIO
     dirs: list[Path]
     tz: tzinfo | None
+    err: TextIO
+    password: PasswordSource
 
 
 def main(
@@ -52,17 +58,46 @@ def main(
     err: TextIO | None = None,
     backup_dirs: Sequence[str | Path] | None = None,
     tz: tzinfo | None = None,
+    ask_password: PasswordSource | None = None,
+    stdin: TextIO | None = None,
 ) -> int:
-    """Run the command line. The keyword arguments let tests swap the screen, folders and time zone."""
+    """Run the command line. The keyword arguments let tests swap the screen, folders, time zone and password."""
     out = sys.stdout if out is None else out
     err = sys.stderr if err is None else err
     args = _parser().parse_args(argv)
     dirs = args.dir or (default_backup_dirs() if backup_dirs is None else backup_dirs)
+    password = ask_password or _ask_password
+    if getattr(args, "password_stdin", False):
+        reader = sys.stdin if stdin is None else stdin
+
+        def password(info: BackupInfo) -> str:
+            return reader.readline().rstrip("\r\n")
+
     try:
-        return args.run(args, Context(out, [Path(d).expanduser() for d in dirs], tz))
+        return args.run(args, Context(out, [Path(d).expanduser() for d in dirs], tz, err, password))
     except (BackupError, ExportError) as error:
         print(f"error: {error}", file=err)
         return 1
+    except KeyboardInterrupt:
+        print(file=err)
+        return 130
+
+
+def _ask_password(info: BackupInfo) -> str:  # pragma: no cover - needs a person at a terminal
+    return getpass.getpass(f"Backup password for {info.name} (not the phone's passcode): ")
+
+
+def _open(path: Path, ctx: Context) -> Backup:
+    """Open a backup, asking for its password if it's encrypted. The password isn't kept."""
+    try:
+        return Backup(path)
+    except PasswordNeeded:
+        info = read_info(path)
+        password = ctx.password(info)
+        if not password:
+            raise BackupError(f"The backup of {info.name} is encrypted, and no password was given.") from None
+        print("Unlocking the backup. This takes a few seconds.", file=ctx.err)
+        return Backup(path, password)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -86,17 +121,24 @@ def _parser() -> argparse.ArgumentParser:
         help="the backup's folder, folder name, or device name (can be left out if there's only one backup)",
     )
 
+    secret = argparse.ArgumentParser(add_help=False)
+    secret.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="read an encrypted backup's password from the first line of standard input, instead of asking",
+    )
+
     listing = commands.add_parser("list", parents=[where], help="list the backups on this computer")
     listing.set_defaults(run=_list)
     info = commands.add_parser("info", parents=[which, where], help="show a backup's device, date and contents")
     info.set_defaults(run=_info)
     photos = commands.add_parser(
-        "photos", parents=[which, where], help="count the photos and thumbnails a backup holds"
+        "photos", parents=[which, where, secret], help="count the photos and thumbnails a backup holds"
     )
     photos.add_argument("--list", action="store_true", help="list the thumbnails whose original isn't in the backup")
     photos.set_defaults(run=_photos)
     saving = commands.add_parser(
-        "export", parents=[which, where], help="save the leftover thumbnails, with a report page to open"
+        "export", parents=[which, where, secret], help="save the leftover thumbnails, with a report page to open"
     )
     saving.add_argument(
         "--out", required=True, metavar="FOLDER", help="a new or empty folder to save them in, outside the backup"
@@ -162,7 +204,7 @@ def _info(args: argparse.Namespace, ctx: Context) -> int:
         print("  " + line, file=ctx.out)
     if info.encrypted:
         print(
-            "\nIt's encrypted, so afterimage can't look inside yet. That's planned, using the backup's own password.",
+            "\nIt's encrypted. afterimage photos and afterimage export ask for its backup password to open it.",
             file=ctx.out,
         )
     if domains:
@@ -174,7 +216,7 @@ def _info(args: argparse.Namespace, ctx: Context) -> int:
 
 
 def _photos(args: argparse.Namespace, ctx: Context) -> int:
-    with Backup(_resolve(args.backup, ctx)) as backup:
+    with _open(_resolve(args.backup, ctx), ctx) as backup:
         info, roll = backup.info, scan(backup)
         library, problem = _read_library(backup, roll)
 
@@ -272,7 +314,7 @@ def _photos(args: argparse.Namespace, ctx: Context) -> int:
 def _export(args: argparse.Namespace, ctx: Context) -> int:
     from .report import ORDER
 
-    with Backup(_resolve(args.backup, ctx)) as backup:
+    with _open(_resolve(args.backup, ctx), ctx) as backup:
         roll = scan(backup)
         library, problem = _read_library(backup, roll)
         if not find_leftovers(roll, library) and not recently_deleted_in_backup(roll, library):
@@ -296,7 +338,7 @@ def _export(args: argparse.Namespace, ctx: Context) -> int:
     if result.missing:
         print(
             f"{_plural(len(result.missing), 'photo or video', 'photos and videos')} couldn't be saved:"
-            " their files are missing from the backup folder.",
+            " their files are missing from the backup folder, or damaged.",
             file=ctx.out,
         )
     print(

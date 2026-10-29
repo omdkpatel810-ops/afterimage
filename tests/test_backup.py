@@ -191,6 +191,7 @@ def test_files_by_domain_and_prefix(phone):
             kind="file",
             size=16,
             modified=datetime(2026, 10, 19, 21, 14, tzinfo=timezone.utc),
+            protection_class=3,
         )
     ]
     assert sms[0].name == "sms.db"

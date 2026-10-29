@@ -9,7 +9,9 @@ A backup folder (iOS 10 and later) holds:
   the first two characters of that name.
 
 Everything here only reads. Manifest.db is opened read-only and as "immutable", so SQLite never writes to
-it, not even a lock or journal file.
+it, not even a lock or journal file. An encrypted backup is opened with its password (see crypto.py): its
+Manifest.db is decrypted into a private temporary folder that's deleted when the backup is closed, and each
+file is decrypted as it's read.
 """
 
 from __future__ import annotations
@@ -19,13 +21,16 @@ import os
 import platform
 import plistlib
 import re
+import shutil
 import sqlite3
+import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from . import crypto
 from .keyedarchive import ArchiveError, unarchive
 
 _FILE_ID = re.compile(r"[0-9a-f]{40}")
@@ -34,6 +39,10 @@ _KINDS = {1: "file", 2: "folder", 4: "link"}
 
 class BackupError(Exception):
     """Something stops the backup being read; the message says what, in plain words."""
+
+
+class PasswordNeeded(BackupError):
+    """The backup is encrypted, and opening it needs its backup password."""
 
 
 def file_id(domain: str, relative_path: str) -> str:
@@ -152,6 +161,8 @@ class BackupFile:
     kind: str  # "file", "folder", "link" or "other"
     size: int | None = None
     modified: datetime | None = None
+    protection_class: int | None = field(default=None, repr=False)  # encrypted backups only
+    wrapped_key: bytes | None = field(default=None, repr=False)  # the file's own key, wrapped
 
     @property
     def name(self) -> str:
@@ -159,21 +170,18 @@ class BackupFile:
 
 
 class Backup:
-    """An unencrypted backup, open for reading.
+    """A backup, open for reading. An encrypted one needs its backup password.
 
     >>> with Backup(path) as backup:
     ...     for f in backup.files("CameraRollDomain", "Media/DCIM/"):
-    ...         print(f.relative_path, backup.locate(f))
+    ...         data = backup.read(f)
     """
 
-    def __init__(self, path: str | os.PathLike[str]) -> None:
+    def __init__(self, path: str | os.PathLike[str], password: str | None = None) -> None:
         self.info = read_info(path)
         self.path = self.info.path
-        if self.info.encrypted:
-            raise BackupError(
-                f"The backup of {self.info.name} is encrypted. afterimage can't read encrypted backups yet;"
-                " that's planned, using the backup's own password. It never tries to get around it."
-            )
+        self._keys: dict[int, bytes] | None = None
+        self._scratch: tempfile.TemporaryDirectory[str] | None = None
         manifest = self.path / "Manifest.db"
         if not manifest.is_file():
             if (self.path / "Manifest.mbdb").is_file():
@@ -181,12 +189,46 @@ class Backup:
                     f"The backup in {self.path} was made by iOS 9 or earlier. afterimage reads backups from iOS 10 on."
                 )
             raise BackupError(f"{self.path} has no Manifest.db, so the backup may be unfinished. Make a new backup.")
+        if self.info.encrypted:
+            if password is None:
+                raise PasswordNeeded(
+                    f"The backup of {self.info.name} is encrypted, so it needs its backup password."
+                    " afterimage never tries to get around it."
+                )
+            manifest = self._unlock(manifest, password)
         self._db = sqlite3.connect(f"{manifest.resolve().as_uri()}?mode=ro&immutable=1", uri=True)
         try:
             self._db.execute("SELECT fileID, domain, relativePath, flags, file FROM Files LIMIT 1").fetchall()
         except sqlite3.DatabaseError as error:
-            self._db.close()
+            self.close()
             raise BackupError(f"Couldn't read Manifest.db in {self.path}: {error}") from error
+
+    def _unlock(self, manifest: Path, password: str) -> Path:
+        """Unlock the keybag, and decrypt Manifest.db into a private temporary folder."""
+        plist = _load_plist(self.path / "Manifest.plist") or {}
+        keybag, manifest_key = plist.get("BackupKeyBag"), plist.get("ManifestKey")
+        if not isinstance(keybag, bytes):
+            raise BackupError(f"The backup of {self.info.name} says it's encrypted, but has no keybag to unlock.")
+        try:
+            self._keys = crypto.unlock(crypto.parse_keybag(keybag), password)
+            self._scratch = tempfile.TemporaryDirectory(prefix="afterimage-")  # readable only by this user
+            plain = Path(self._scratch.name) / "Manifest.db"
+            if isinstance(manifest_key, bytes) and len(manifest_key) > 4:
+                protection_class = int.from_bytes(manifest_key[:4], "little")
+                key = crypto.class_unwrap(self._keys, protection_class, manifest_key[4:])
+                crypto.decrypt_file(key, manifest, plain)
+            else:  # before iOS 10.2, the files were encrypted but their list wasn't
+                shutil.copyfile(manifest, plain)
+        except crypto.WrongPassword as error:
+            self.close()
+            raise BackupError(
+                f"That password doesn't unlock the backup of {self.info.name}. It's the password chosen when"
+                " \u201cEncrypt local backup\u201d was turned on, not the phone's passcode."
+            ) from error
+        except crypto.CryptoError as error:
+            self.close()
+            raise BackupError(str(error)) from error
+        return plain
 
     def __enter__(self) -> Backup:
         return self
@@ -195,7 +237,15 @@ class Backup:
         self.close()
 
     def close(self) -> None:
-        self._db.close()
+        if getattr(self, "_db", None) is not None:
+            self._db.close()
+        if self._scratch is not None:
+            self._scratch.cleanup()
+            self._scratch = None
+
+    @property
+    def encrypted(self) -> bool:
+        return self._keys is not None
 
     def files(self, domain: str | None = None, prefix: str = "") -> Iterator[BackupFile]:
         """Every entry, or those in one domain and/or under a path prefix (matched exactly, case and all)."""
@@ -237,10 +287,45 @@ class Backup:
         candidate = self.path / entry.file_id[:2] / entry.file_id
         return candidate if candidate.is_file() else None
 
+    def read(self, entry: BackupFile) -> bytes:
+        """A file's contents, decrypted if the backup is encrypted."""
+        source = self._source(entry)
+        data = source.read_bytes()
+        if self._keys is None or not data:
+            return data
+        try:
+            return crypto.decrypt(self._file_key(entry), data)
+        except crypto.CryptoError as error:
+            raise BackupError(f"Couldn't decrypt {entry.relative_path}: {error}") from error
+
+    def copy(self, entry: BackupFile, target: Path) -> None:
+        """Copy a file out of the backup, decrypting it on the way if the backup is encrypted."""
+        source = self._source(entry)
+        if self._keys is None or source.stat().st_size == 0:
+            shutil.copyfile(source, target)
+            return
+        try:
+            crypto.decrypt_file(self._file_key(entry), source, target)
+        except crypto.CryptoError as error:
+            target.unlink(missing_ok=True)
+            raise BackupError(f"Couldn't decrypt {entry.relative_path}: {error}") from error
+
+    def _source(self, entry: BackupFile) -> Path:
+        source = self.locate(entry)
+        if source is None:
+            raise BackupError(f"{entry.relative_path} is listed in the backup, but its file is missing.")
+        return source
+
+    def _file_key(self, entry: BackupFile) -> bytes:
+        assert self._keys is not None
+        if entry.protection_class is None or entry.wrapped_key is None:
+            raise crypto.CryptoError("the backup holds no key for it")
+        return crypto.class_unwrap(self._keys, entry.protection_class, entry.wrapped_key)
+
 
 def _to_file(row: tuple[Any, ...]) -> BackupFile:
     fid, domain, relative_path, flags, blob = row
-    size = modified = None
+    size = modified = protection_class = wrapped_key = None
     if isinstance(blob, bytes):
         try:
             details = unarchive(blob)
@@ -251,8 +336,20 @@ def _to_file(row: tuple[Any, ...]) -> BackupFile:
             if isinstance(raw_size, int) and not isinstance(raw_size, bool) and raw_size >= 0:
                 size = raw_size
             modified = _from_unix(details.get("LastModified"))
+            raw_class, raw_key = details.get("ProtectionClass"), details.get("EncryptionKey")
+            if isinstance(raw_class, int) and not isinstance(raw_class, bool):
+                protection_class = raw_class
+            if isinstance(raw_key, bytes) and len(raw_key) > 4:  # 4 bytes of class, then the wrapped key
+                wrapped_key = raw_key[4:]
     return BackupFile(
-        str(fid or ""), str(domain or ""), str(relative_path or ""), _KINDS.get(flags, "other"), size, modified
+        str(fid or ""),
+        str(domain or ""),
+        str(relative_path or ""),
+        _KINDS.get(flags, "other"),
+        size,
+        modified,
+        protection_class,
+        wrapped_key,
     )
 
 

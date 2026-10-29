@@ -16,10 +16,18 @@ DEFAULT = object()
 OLDER = datetime(2025, 3, 1, 9, 5, tzinfo=timezone.utc)
 
 
-def run(*args, dirs=DEFAULT, backups_dir=None):
+def run(*args, dirs=DEFAULT, backups_dir=None, password=None, stdin=None):
     out, err = io.StringIO(), io.StringIO()
     folders = [backups_dir] if dirs is DEFAULT else dirs
-    code = main(list(args), out=out, err=err, backup_dirs=folders, tz=timezone.utc)
+    code = main(
+        list(args),
+        out=out,
+        err=err,
+        backup_dirs=folders,
+        tz=timezone.utc,
+        ask_password=password or (lambda info: None),
+        stdin=stdin,
+    )
     return code, out.getvalue(), err.getvalue()
 
 
@@ -116,7 +124,7 @@ def test_info_on_an_encrypted_unfinished_backup(backups_dir):
         "  Finished   unknown",
         f"  Folder     {root}",
         "",
-        "It's encrypted, so afterimage can't look inside yet. That's planned, using the backup's own password.",
+        "It's encrypted. afterimage photos and afterimage export ask for its backup password to open it.",
     ]
 
 
@@ -288,7 +296,7 @@ def test_photos_refuses_an_encrypted_backup(backups_dir):
     fake.build()
     code, out, err = run("photos", backups_dir=backups_dir)
     assert (code, out) == (1, "")
-    assert err.startswith("error: The backup of Om's iPhone is encrypted.")
+    assert err.strip() == "error: The backup of Om's iPhone is encrypted, and no password was given."
 
 
 # Picking a backup -------------------------------------------------------------------------------------
